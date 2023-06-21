@@ -14,17 +14,43 @@ public class HotelService implements Participant {
 
     @Override
     public UDPMessage prepare(UDPMessage udpMessage) {
-        return null;
+        String prepareResultJsonString = bookingDAO.reserveRoom(udpMessage.getData(), udpMessage.getTransactionId());
+
+        // Create a new UDPMessage with the bookingId as payload
+        return new UDPMessage(
+                udpMessage.getOperation(),
+                udpMessage.getTransactionId(),
+                "HOTEL_PROVIDER",
+                prepareResultJsonString
+        );
     }
 
     @Override
     public UDPMessage commit(UDPMessage udpMessage) {
-        return null;
+        boolean success = bookingDAO.confirmBooking(udpMessage.getData());
+
+        // Create a new UDPMessage with an acknowledgement as payload
+        String commitResultJsonString = "{\"success\": " + success + "}";
+        return new UDPMessage(
+                udpMessage.getOperation(),
+                udpMessage.getTransactionId(),
+                "HOTEL_PROVIDER",
+                commitResultJsonString
+        );
     }
 
     @Override
     public UDPMessage abort(UDPMessage udpMessage) {
-        return null;
+        boolean success = bookingDAO.abortBooking(udpMessage.getData());
+
+        // Create a new UDPMessage with an acknowledgement as payload
+        String commitResultJsonString = "{\"success\": " + success + "}";
+        return new UDPMessage(
+                udpMessage.getOperation(),
+                udpMessage.getTransactionId(),
+                "HOTEL_PROVIDER",
+                commitResultJsonString
+        );
     }
 
     public UDPMessage getBookings(UDPMessage parsedMessage) {
