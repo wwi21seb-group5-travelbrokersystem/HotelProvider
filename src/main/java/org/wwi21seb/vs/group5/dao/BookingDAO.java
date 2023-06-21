@@ -21,14 +21,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-public class BookingDAO implements TransactionContext {
+public class BookingDAO {
 
     private final ObjectMapper mapper;
     private final DateTimeFormatter dateFormatter;
 
     public BookingDAO() {
         this.mapper = new ObjectMapper();
-        this.dateFormatter = DateTimeFormatter.ofPattern("dd-MM-yyyy");
+        this.dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     }
 
     private String serializeBookings(List<Booking> bookings) throws JsonProcessingException {
@@ -48,22 +48,22 @@ public class BookingDAO implements TransactionContext {
 
             // SELECT ROOM TO GET DAILY PRICE
             stmt = conn.prepareStatement("SELECT * FROM rooms WHERE room_id = ?");
-            stmt.setObject(1, hotelReservationRequest.getRoomID());
+            stmt.setObject(1, hotelReservationRequest.roomID());
             stmt.executeQuery();
 
             ResultSet resultSet = stmt.getResultSet();
             resultSet.next();
             double dailyPrice = resultSet.getDouble("daily_price");
 
-            LocalDate startDate = LocalDate.parse(hotelReservationRequest.getStartDate(), dateFormatter);
-            LocalDate endDate = LocalDate.parse(hotelReservationRequest.getEndDate(), dateFormatter);
+            LocalDate startDate = LocalDate.parse(hotelReservationRequest.startDate(), dateFormatter);
+            LocalDate endDate = LocalDate.parse(hotelReservationRequest.endDate(), dateFormatter);
             double totalPrice = dailyPrice * (startDate.until(endDate).getDays() + 1);
 
             stmt = conn.prepareStatement("INSERT INTO bookings (booking_id, room_id, start_date, end_date, total_price) VALUES (?, ?, ?, ?, ?)");
             stmt.setObject(1, bookingId);
-            stmt.setObject(2, hotelReservationRequest.getRoomID());
-            stmt.setDate(3, java.sql.Date.valueOf(hotelReservationRequest.getStartDate()));
-            stmt.setDate(4, java.sql.Date.valueOf(hotelReservationRequest.getEndDate()));
+            stmt.setObject(2, hotelReservationRequest.roomID());
+            stmt.setDate(3, java.sql.Date.valueOf(hotelReservationRequest.startDate()));
+            stmt.setDate(4, java.sql.Date.valueOf(hotelReservationRequest.endDate()));
             stmt.setDouble(5, totalPrice);
             stmt.executeUpdate();
         } catch (SQLException e) {
@@ -84,7 +84,7 @@ public class BookingDAO implements TransactionContext {
             ResultSet resultSet = stmt.getResultSet();
             while (resultSet.next()) {
                 Booking booking = new Booking(
-                        resultSet.getObject("id", java.util.UUID.class),
+                        resultSet.getObject("booking_id", java.util.UUID.class),
                         resultSet.getObject("room_id", java.util.UUID.class),
                         resultSet.getDate("start_date"),
                         resultSet.getDate("end_date"),
@@ -102,18 +102,18 @@ public class BookingDAO implements TransactionContext {
         }
     }
 
-    public String getAvailableRooms(Object payload) {
+    public String getAvailableRooms(String payload) {
         PreparedStatement stmt = null;
         List<Room> availableRooms = new ArrayList<>();
 
-        AvailabilityRequest availabilityRequest = mapper.convertValue(payload, AvailabilityRequest.class);
-
         try (Connection conn = DatabaseConnection.getConnection(true)) {
-            LocalDate startDate = LocalDate.parse(availabilityRequest.startDate(), dateFormatter);
-            LocalDate endDate = LocalDate.parse(availabilityRequest.endDate(), dateFormatter);
+            AvailabilityRequest availabilityRequest = mapper.readValue(payload, AvailabilityRequest.class);
+
+            LocalDate startDate = LocalDate.parse(availabilityRequest.getStartDate(), dateFormatter);
+            LocalDate endDate = LocalDate.parse(availabilityRequest.getEndDate(), dateFormatter);
 
             stmt = conn.prepareStatement("SELECT * FROM rooms WHERE capacity >= ? AND room_id NOT IN (SELECT room_id FROM bookings WHERE start_date BETWEEN ? AND ? OR end_date BETWEEN ? AND ?)");
-            stmt.setInt(1, availabilityRequest.numberOfPersons());
+            stmt.setInt(1, availabilityRequest.getNumberOfPersons());
             stmt.setDate(2, java.sql.Date.valueOf(startDate));
             stmt.setDate(3, java.sql.Date.valueOf(endDate));
             stmt.setDate(4, java.sql.Date.valueOf(startDate));
@@ -123,7 +123,7 @@ public class BookingDAO implements TransactionContext {
             ResultSet resultSet = stmt.getResultSet();
             while (resultSet.next()) {
                 Room booking = new Room(
-                        resultSet.getObject("id", java.util.UUID.class),
+                        resultSet.getObject("room_id", java.util.UUID.class),
                         resultSet.getString("type"),
                         resultSet.getInt("capacity"),
                         resultSet.getDouble("price_per_night")
@@ -140,13 +140,4 @@ public class BookingDAO implements TransactionContext {
         }
     }
 
-    @Override
-    public void commit() {
-
-    }
-
-    @Override
-    public void abort() {
-
-    }
 }
