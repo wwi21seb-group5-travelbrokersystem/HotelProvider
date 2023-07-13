@@ -3,16 +3,12 @@ package org.wwi21seb.vs.group5.dao;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.wwi21seb.vs.group5.Request.AvailabilityRequest;
-import org.wwi21seb.vs.group5.Request.HotelReservationRequest;
-import org.wwi21seb.vs.group5.Request.PrepareResult;
+import org.wwi21seb.vs.group5.Request.ReservationRequest;
 import org.wwi21seb.vs.group5.communication.DatabaseConnection;
 import org.wwi21seb.vs.group5.Model.Booking;
 import org.wwi21seb.vs.group5.Model.Room;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.sql.*;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -37,46 +33,59 @@ public class BookingDAO {
         return mapper.writeValueAsString(availableRooms);
     }
 
-    public String reserveRoom(String payload, UUID transactionID) {
+    public UUID reserveRoom(ReservationRequest request, UUID transactionID) {
         PreparedStatement stmt = null;
         UUID bookingId = UUID.randomUUID();
 
         try (Connection conn = DatabaseConnection.getConnection()) {
-            HotelReservationRequest hotelReservationRequest = mapper.readValue(payload, HotelReservationRequest.class);
-
             // SELECT ROOM TO GET DAILY PRICE
             stmt = conn.prepareStatement("SELECT price_per_night FROM rooms WHERE room_id = ?");
-            stmt.setObject(1, hotelReservationRequest.getRoomID());
+            stmt.setObject(1, request.getResourceId());
             stmt.executeQuery();
 
             ResultSet resultSet = stmt.getResultSet();
             resultSet.next();
             double dailyPrice = resultSet.getDouble("price_per_night");
 
-            LocalDate startDate = LocalDate.parse(hotelReservationRequest.getStartDate(), dateFormatter);
-            LocalDate endDate = LocalDate.parse(hotelReservationRequest.getEndDate(), dateFormatter);
+            // CHECK IF ROOM IS AVAILABLE
+            stmt = conn.prepareStatement("SELECT * FROM bookings WHERE room_id = ? AND ((start_date <= ? AND end_date >= ?) OR (start_date <= ? AND end_date >= ?))");
+            stmt.setObject(1, request.getResourceId());
+            stmt.setDate(2, Date.valueOf(request.getStartDate()));
+            stmt.setDate(3, Date.valueOf(request.getStartDate()));
+            stmt.setDate(4, Date.valueOf(request.getEndDate()));
+            stmt.setDate(5, Date.valueOf(request.getEndDate()));
+            stmt.executeQuery();
+
+            resultSet = stmt.getResultSet();
+            if (resultSet.next()) {
+                return null;
+            }
+
+            // PREPARE BOOKING
+            LocalDate startDate = LocalDate.parse(request.getStartDate(), dateFormatter);
+            LocalDate endDate = LocalDate.parse(request.getEndDate(), dateFormatter);
             double totalPrice = dailyPrice * (startDate.until(endDate).getDays() + 1);
 
             stmt = conn.prepareStatement("INSERT INTO bookings (booking_id, room_id, start_date, end_date, total_price, is_confirmed) VALUES (?, ?, ?, ?, ?, ?)");
             stmt.setObject(1, bookingId);
-            stmt.setObject(2, hotelReservationRequest.getRoomID());
-            stmt.setDate(3, java.sql.Date.valueOf(hotelReservationRequest.getStartDate()));
-            stmt.setDate(4, java.sql.Date.valueOf(hotelReservationRequest.getEndDate()));
+            stmt.setObject(2, request.getResourceId());
+            stmt.setDate(3, Date.valueOf(request.getStartDate()));
+            stmt.setDate(4, Date.valueOf(request.getEndDate()));
             stmt.setDouble(5, totalPrice);
             stmt.setBoolean(6, false);
             stmt.executeUpdate();
-            return mapper.writeValueAsString(new PrepareResult(transactionID, bookingId));
+
+            return bookingId;
         } catch (SQLException e) {
             System.out.println("SQL Exception: " + e.getMessage());
-            return null;
-        } catch (JsonProcessingException e) {
-            System.out.println("JSON Exception: " + e.getMessage());
             return null;
         }
     }
 
     public boolean confirmBooking(String payload) {
         PreparedStatement stmt = null;
+
+        /*
 
         try (Connection conn = DatabaseConnection.getConnection()) {
             PrepareResult prepareResult = mapper.readValue(payload, PrepareResult.class);
@@ -91,21 +100,30 @@ public class BookingDAO {
             return false;
         }
 
-        return true;
+         */
+
+        return false;
     }
 
-    public boolean abortBooking(Object payload) {
+    public boolean abortBooking(String payload) {
         PreparedStatement stmt = null;
-        PrepareResult prepareResult = mapper.convertValue(payload, PrepareResult.class);
+
+        /*
 
         try (Connection conn = DatabaseConnection.getConnection()) {
+            PrepareResult prepareResult = mapper.readValue(payload, PrepareResult.class);
             stmt = conn.prepareStatement("DELETE FROM bookings WHERE booking_id = ?");
             stmt.setObject(1, prepareResult.getResourceId(), java.sql.Types.OTHER);
             stmt.executeUpdate();
         } catch (SQLException e) {
             System.out.println("SQL Exception: " + e.getMessage());
             return false;
+        } catch (JsonProcessingException e) {
+            System.out.println("JSON Exception: " + e.getMessage());
+            return false;
         }
+
+         */
 
         return false;
     }

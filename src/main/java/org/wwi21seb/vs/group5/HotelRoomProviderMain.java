@@ -21,54 +21,52 @@ public class HotelRoomProviderMain {
         try (DatagramSocket socket = new DatagramSocket(5002)) {
             System.out.printf("Hotel Room Provider: Socket initialized on port %s!%n", socket.getLocalPort());
 
-            byte[] buffer = new byte[1024];
+            byte[] buffer = new byte[16384];
             DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
             System.out.println("Hotel Room Provider: Waiting for message...");
 
             while (true) {
                 socket.receive(packet);
                 String message = new String(packet.getData(), 0, packet.getLength());
-                System.out.printf("Hotel Room Provider: Received message: %s%n", message);
+                System.out.printf("Hotel Room Provider: Received message: %s from %s%n", message, packet.getAddress());
 
                 UDPMessage parsedMessage = mapper.readValue(message, UDPMessage.class);
-                System.out.printf("Hotel Room Provider: Parsed message: %s%n", parsedMessage);
-
                 UDPMessage response = null;
 
                 switch (parsedMessage.getOperation()) {
                     case PREPARE -> {
-                        System.out.println("Hotel Room Provider: Booking room!");
+                        System.out.printf("Hotel Room Provider - %s: Booking room!%n", parsedMessage.getTransactionId());
                         response = hotelService.prepare(parsedMessage);
                     }
                     case COMMIT -> {
-                        System.out.println("Hotel Room Provider: Committing transaction!");
+                        System.out.printf("Hotel Room Provider - %s: Committing transaction!", parsedMessage.getTransactionId());
                         response = hotelService.commit(parsedMessage);
                     }
                     case ABORT -> {
-                        System.out.println("Hotel Room Provider: Aborting transaction!");
+                        System.out.printf("Hotel Room Provider - %s: Aborting transaction!%n", parsedMessage.getTransactionId());
                         response = hotelService.abort(parsedMessage);
                     }
                     case GET_BOOKINGS -> {
-                        System.out.println("Hotel Room Provider: Getting bookings!");
+                        System.out.printf("Hotel Room Provider - %s: Getting bookings!%n", parsedMessage.getTransactionId());
                         response = hotelService.getBookings(parsedMessage);
                     }
                     case GET_AVAILABILITY -> {
-                        System.out.println("Hotel Room Provider: Getting available rooms!");
+                        System.out.printf("Hotel Room Provider - %s: Getting available rooms!%n", parsedMessage.getTransactionId());
                         response = hotelService.getAvailableRooms(parsedMessage);
                     }
                     default -> {
-                        System.out.println("Hotel Room Provider: Unknown operation!");
+                        System.out.printf("Hotel Room Provider - %s: Unknown operation!%n", parsedMessage.getTransactionId());
                     }
                 }
 
                 if (response != null) {
-                    System.out.printf("Hotel Room Provider: Sending response: %s%n", response);
+                    System.out.printf("Hotel Room Provider - %s: Sending response to %s:%s: %s%n", parsedMessage.getTransactionId(), packet.getAddress(), packet.getPort(), response);
                     byte[] responseBytes = mapper.writeValueAsBytes(response);
                     DatagramPacket responsePacket = new DatagramPacket(responseBytes, responseBytes.length, packet.getAddress(), packet.getPort());
                     socket.send(responsePacket);
                 }
 
-                System.out.println("Hotel Room Provider: Waiting for message...");
+                System.out.println("%nHotel Room Provider: Waiting for message...");
             }
         } catch (SocketException e) {
             System.out.println("Hotel Room Provider: Error while initializing socket!");
