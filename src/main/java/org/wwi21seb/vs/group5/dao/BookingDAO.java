@@ -2,8 +2,10 @@ package org.wwi21seb.vs.group5.dao;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.wwi21seb.vs.group5.Logger.LoggerFactory;
 import org.wwi21seb.vs.group5.Request.AvailabilityRequest;
 import org.wwi21seb.vs.group5.Request.ReservationRequest;
+import org.wwi21seb.vs.group5.UDP.UDPMessage;
 import org.wwi21seb.vs.group5.communication.DatabaseConnection;
 import org.wwi21seb.vs.group5.Model.Booking;
 import org.wwi21seb.vs.group5.Model.Room;
@@ -14,9 +16,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.logging.Logger;
 
 public class BookingDAO {
 
+    private final Logger LOGGER = LoggerFactory.setupLogger(BookingDAO.class.getName());
     private final ObjectMapper mapper;
     private final DateTimeFormatter dateFormatter;
 
@@ -75,57 +79,45 @@ public class BookingDAO {
             stmt.setBoolean(6, false);
             stmt.executeUpdate();
 
+            stmt.close();
             return bookingId;
         } catch (SQLException e) {
-            System.out.println("SQL Exception: " + e.getMessage());
+            LOGGER.severe("SQL Exception: " + e.getMessage());
             return null;
         }
     }
 
-    public boolean confirmBooking(String payload) {
+    public boolean confirmBooking(UUID bookingId) {
         PreparedStatement stmt = null;
 
-        /*
 
         try (Connection conn = DatabaseConnection.getConnection()) {
-            PrepareResult prepareResult = mapper.readValue(payload, PrepareResult.class);
             stmt = conn.prepareStatement("UPDATE bookings SET is_confirmed = true WHERE booking_id = ?");
-            stmt.setObject(1, prepareResult.getResourceId(), java.sql.Types.OTHER);
+            stmt.setObject(1, bookingId, java.sql.Types.OTHER);
             stmt.executeUpdate();
+            stmt.close();
         } catch (SQLException  e) {
-            System.out.println("SQL Exception: " + e.getMessage());
-            return false;
-        } catch (JsonProcessingException e) {
-            System.out.println("JSON Exception: " + e.getMessage());
+            LOGGER.severe("SQL Exception: " + e.getMessage());
             return false;
         }
 
-         */
-
-        return false;
+        return true;
     }
 
-    public boolean abortBooking(String payload) {
+    public boolean abortBooking(UUID bookingId) {
         PreparedStatement stmt = null;
 
-        /*
-
         try (Connection conn = DatabaseConnection.getConnection()) {
-            PrepareResult prepareResult = mapper.readValue(payload, PrepareResult.class);
             stmt = conn.prepareStatement("DELETE FROM bookings WHERE booking_id = ?");
-            stmt.setObject(1, prepareResult.getResourceId(), java.sql.Types.OTHER);
+            stmt.setObject(1, bookingId, java.sql.Types.OTHER);
             stmt.executeUpdate();
+            stmt.close();
         } catch (SQLException e) {
-            System.out.println("SQL Exception: " + e.getMessage());
-            return false;
-        } catch (JsonProcessingException e) {
-            System.out.println("JSON Exception: " + e.getMessage());
+            LOGGER.severe("SQL Exception: " + e.getMessage());
             return false;
         }
 
-         */
-
-        return false;
+        return true;
     }
 
     public String getBookings() {
@@ -149,10 +141,10 @@ public class BookingDAO {
                 bookings.add(booking);
             }
 
+            stmt.close();
             return serializeBookings(bookings);
         } catch (Exception e) {
-            System.out.println("Error while getting bookings: " + e.getMessage());
-            e.printStackTrace();
+            LOGGER.severe("SQL Exception: " + e.getMessage());
             throw new RuntimeException();
         }
     }
@@ -187,10 +179,10 @@ public class BookingDAO {
                 availableRooms.add(booking);
             }
 
+            stmt.close();
             return serializeRooms(availableRooms);
         } catch (Exception e) {
-            System.out.println("Error while getting available rooms: " + e.getMessage());
-            e.printStackTrace();
+            LOGGER.severe("Error while getting available rooms: " + e.getMessage());
             throw new RuntimeException();
         }
     }

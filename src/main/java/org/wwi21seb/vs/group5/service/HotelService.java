@@ -2,6 +2,7 @@ package org.wwi21seb.vs.group5.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.wwi21seb.vs.group5.Logger.LoggerFactory;
 import org.wwi21seb.vs.group5.Request.ReservationRequest;
 import org.wwi21seb.vs.group5.Request.TransactionResult;
 import org.wwi21seb.vs.group5.TwoPhaseCommit.*;
@@ -15,7 +16,7 @@ import java.util.logging.Logger;
 
 public class HotelService {
 
-    private static final Logger LOGGER = Logger.getLogger(HotelService.class.getName());
+    private static final Logger LOGGER = LoggerFactory.setupLogger(HotelService.class.getName());
     private final ConcurrentHashMap<UUID, ParticipantContext> contexts = new ConcurrentHashMap<>();
     private final LogWriter<ParticipantContext> logWriter = new LogWriter<>();
     private static final String HOTEL_PROVIDER = "HotelProvider";
@@ -25,6 +26,13 @@ public class HotelService {
     public HotelService() {
         this.bookingDAO = new BookingDAO();
         this.mapper = new ObjectMapper();
+
+        // Restore the state of the service
+        // This is done by reading the log file and replaying the transactions
+        for (ParticipantContext participantContext : logWriter.readAllLogs()) {
+            LOGGER.log(Level.INFO, "Restoring transaction {0}", participantContext.getTransactionId());
+            contexts.put(participantContext.getTransactionId(), participantContext);
+        }
     }
 
     public UDPMessage prepare(UDPMessage message) {
@@ -53,28 +61,20 @@ public class HotelService {
         if (bookingId == null) {
             // If the bookingId is null, the reservation failed
             // We need to set our decision to ABORT and send it to the coordinator
-            participantContext.setParticipants(
-                    participantContext.getParticipants().stream()
-                            .peek(participant -> {
-                                if (participant.getName().equals(HOTEL_PROVIDER)) {
+            participantContext.setParticipants(participantContext.getParticipants().stream().peek(participant -> {
+                if (participant.getName().equals(HOTEL_PROVIDER)) {
 
-                                    participant.setVote(Vote.NO);
-                                }
-                            })
-                            .toList()
-            );
+                    participant.setVote(Vote.NO);
+                }
+            }).toList());
 
             transactionResult = new TransactionResult(false);
         } else {
-            participantContext.setParticipants(
-                    participantContext.getParticipants().stream()
-                            .peek(participant -> {
-                                if (participant.getName().equals(HOTEL_PROVIDER)) {
-                                    participant.setVote(Vote.YES);
-                                }
-                            })
-                            .toList()
-            );
+            participantContext.setParticipants(participantContext.getParticipants().stream().peek(participant -> {
+                if (participant.getName().equals(HOTEL_PROVIDER)) {
+                    participant.setVote(Vote.YES);
+                }
+            }).toList());
             participantContext.setBookingIdForParticipant(bookingId, HOTEL_PROVIDER);
             transactionResult = new TransactionResult(true);
         }
@@ -93,28 +93,91 @@ public class HotelService {
             throw new RuntimeException(e);
         }
 
-        return new UDPMessage(
-                message.getOperation(),
-                message.getTransactionId(),
-                HOTEL_PROVIDER,
-                transactionResultString
-        );
+        return new UDPMessage(message.getOperation(), message.getTransactionId(), HOTEL_PROVIDER, transactionResultString);
     }
 
-    public UDPMessage commit(UDPMessage udpMessage) {
-        boolean success = bookingDAO.confirmBooking(udpMessage.getData());
+    public UDPMessage commit(UDPMessage message) {
+        // Get the participantContext from contexts
+        ParticipantContext participantContext = contexts.get(message.getTransactionId());
+        participantContext.setTransactionState(TransactionState.COMMIT);
+
+        // Get the participant from the participantContext
+        Participant participant = participantContext.getParticipants().stream().filter(p -> p.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow();
+
+        if (participant.isDone()) {
+            // Double check if the transaction was already committed previously
+            // If so, return a TransactionResult with success = true because
+            // the transaction was already committed
+            TransactionResult transactionResult = new TransactionResult(true);
+            return getSuccessMessage(message, transactionResult);
+        }
+
+        boolean success = bookingDAO.confirmBooking(participant.getBookingContext().getBookingId());
+
+        if (success) {
+            // Update the participantContext
+            participantContext.setParticipants(participantContext.getParticipants().stream().peek(p -> {
+                if (p.getName().equals(HOTEL_PROVIDER)) {
+                    p.setDone();
+                }
+            }).toList());
+        }
+
+        // Update the context in the log
+        contexts.put(participantContext.getTransactionId(), participantContext);
+        logWriter.writeLog(participantContext.getTransactionId(), participantContext);
 
         // Create a new UDPMessage with an acknowledgement as payload
-        String commitResultJsonString = "{\"success\": " + success + "}";
-        return new UDPMessage(udpMessage.getOperation(), udpMessage.getTransactionId(), HOTEL_PROVIDER, commitResultJsonString);
+        TransactionResult transactionResult = new TransactionResult(success);
+        return getSuccessMessage(message, transactionResult);
+    }
+
+    private UDPMessage getSuccessMessage(UDPMessage message, TransactionResult transactionResult) {
+        String transactionResultString;
+
+        try {
+            transactionResultString = mapper.writeValueAsString(transactionResult);
+        } catch (JsonProcessingException e) {
+            LOGGER.log(Level.SEVERE, "Could not parse TransactionResult to JSON", e);
+            throw new RuntimeException(e);
+        }
+
+        return new UDPMessage(message.getOperation(), message.getTransactionId(), HOTEL_PROVIDER, transactionResultString);
     }
 
     public UDPMessage abort(UDPMessage udpMessage) {
-        boolean success = bookingDAO.abortBooking(udpMessage.getData());
+        // Get the participantContext from contexts
+        ParticipantContext participantContext = contexts.get(udpMessage.getTransactionId());
 
-        // Create a new UDPMessage with an acknowledgement as payload
-        String commitResultJsonString = "{\"success\": " + success + "}";
-        return new UDPMessage(udpMessage.getOperation(), udpMessage.getTransactionId(), HOTEL_PROVIDER, commitResultJsonString);
+        // Get the participant from the participantContext
+        Participant participant = participantContext.getParticipants().stream().filter(p -> p.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow();
+
+        if (participant.isDone()) {
+            // Double check if the transaction was already aborted previously
+            // If so, return a TransactionResult with success = true because
+            // the transaction was already aborted
+            TransactionResult transactionResult = new TransactionResult(true);
+            return getSuccessMessage(udpMessage, transactionResult);
+        }
+
+        boolean success = bookingDAO.abortBooking(participant.getBookingContext().getBookingId());
+
+        if (success) {
+            // Update the participantContext
+            participantContext.setParticipants(participantContext.getParticipants().stream().peek(p -> {
+                if (p.getName().equals(HOTEL_PROVIDER)) {
+                    p.setDone();
+                }
+            }).toList());
+        }
+
+
+        // Update the context in the log
+        contexts.put(participantContext.getTransactionId(), participantContext);
+        logWriter.writeLog(participantContext.getTransactionId(), participantContext);
+
+        TransactionResult transactionResult = new TransactionResult(success);
+        return getSuccessMessage(udpMessage, transactionResult);
     }
 
     public UDPMessage getBookings(UDPMessage parsedMessage) {
