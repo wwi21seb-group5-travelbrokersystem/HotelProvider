@@ -30,7 +30,7 @@ public class HotelService {
         // Restore the state of the service
         // This is done by reading the log file and replaying the transactions
         for (ParticipantContext participantContext : logWriter.readAllLogs()) {
-            LOGGER.log(Level.INFO, "Restoring transaction {0}", participantContext.getTransactionId());
+            LOGGER.log(Level.INFO, "Restoring transaction {0}", participantContext);
             contexts.put(participantContext.getTransactionId(), participantContext);
         }
     }
@@ -49,57 +49,38 @@ public class HotelService {
         ParticipantContext participantContext = new ParticipantContext(coordinatorContext);
         contexts.put(participantContext.getTransactionId(), participantContext);
         logWriter.writeLog(participantContext.getTransactionId(), participantContext);
+        LOGGER.log(Level.INFO, "Prepare Transaction {0}", participantContext);
+
+        // Get participant
+        Participant participant = participantContext.getParticipants().stream().filter(p -> p.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow();
 
         // Get the bookingContext of the hotel provider
-        BookingContext bookingContext = participantContext.getParticipants().stream().filter(participant -> participant.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow().getBookingContext();
-
+        BookingContext bookingContext = participant.getBookingContext();
         ReservationRequest reservationRequest = new ReservationRequest(bookingContext.getResourceId(), bookingContext.getStartDate(), bookingContext.getEndDate(), bookingContext.getNumberOfPersons());
-
         UUID bookingId = bookingDAO.reserveRoom(reservationRequest, message.getTransactionId());
         TransactionResult transactionResult = null;
 
         if (bookingId == null) {
             // If the bookingId is null, the reservation failed
             // We need to set our decision to ABORT and send it to the coordinator
-            participantContext.setParticipants(participantContext.getParticipants().stream().peek(participant -> {
-                if (participant.getName().equals(HOTEL_PROVIDER)) {
-
-                    participant.setVote(Vote.NO);
-                }
-            }).toList());
-
+            participant.setVote(Vote.NO);
             transactionResult = new TransactionResult(false);
         } else {
-            participantContext.setParticipants(participantContext.getParticipants().stream().peek(participant -> {
-                if (participant.getName().equals(HOTEL_PROVIDER)) {
-                    participant.setVote(Vote.YES);
-                }
-            }).toList());
+            participant.setVote(Vote.YES);
             participantContext.setBookingIdForParticipant(bookingId, HOTEL_PROVIDER);
             transactionResult = new TransactionResult(true);
         }
 
         // Update the context in the log
-        contexts.put(participantContext.getTransactionId(), participantContext);
         logWriter.writeLog(participantContext.getTransactionId(), participantContext);
-
-        // Create a new UDPMessage with the bookingId as payload
-        String transactionResultString = "";
-
-        try {
-            transactionResultString = mapper.writeValueAsString(transactionResult);
-        } catch (JsonProcessingException e) {
-            LOGGER.log(Level.SEVERE, "Could not parse TransactionResult to JSON", e);
-            throw new RuntimeException(e);
-        }
-
-        return new UDPMessage(message.getOperation(), message.getTransactionId(), HOTEL_PROVIDER, transactionResultString);
+        return getSuccessMessage(message, transactionResult);
     }
 
     public UDPMessage commit(UDPMessage message) {
         // Get the participantContext from contexts
         ParticipantContext participantContext = contexts.get(message.getTransactionId());
         participantContext.setTransactionState(TransactionState.COMMIT);
+        LOGGER.log(Level.INFO, "Commit for transaction {0}", participantContext);
 
         // Get the participant from the participantContext
         Participant participant = participantContext.getParticipants().stream().filter(p -> p.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow();
@@ -116,18 +97,11 @@ public class HotelService {
 
         if (success) {
             // Update the participantContext
-            participantContext.setParticipants(participantContext.getParticipants().stream().peek(p -> {
-                if (p.getName().equals(HOTEL_PROVIDER)) {
-                    p.setDone();
-                }
-            }).toList());
+            participant.setDone();
         }
 
         // Update the context in the log
-        contexts.put(participantContext.getTransactionId(), participantContext);
         logWriter.writeLog(participantContext.getTransactionId(), participantContext);
-
-        // Create a new UDPMessage with an acknowledgement as payload
         TransactionResult transactionResult = new TransactionResult(success);
         return getSuccessMessage(message, transactionResult);
     }
@@ -148,6 +122,8 @@ public class HotelService {
     public UDPMessage abort(UDPMessage udpMessage) {
         // Get the participantContext from contexts
         ParticipantContext participantContext = contexts.get(udpMessage.getTransactionId());
+        participantContext.setTransactionState(TransactionState.ABORT);
+        LOGGER.log(Level.INFO, "Abort for transaction {0}", participantContext);
 
         // Get the participant from the participantContext
         Participant participant = participantContext.getParticipants().stream().filter(p -> p.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow();
@@ -164,18 +140,11 @@ public class HotelService {
 
         if (success) {
             // Update the participantContext
-            participantContext.setParticipants(participantContext.getParticipants().stream().peek(p -> {
-                if (p.getName().equals(HOTEL_PROVIDER)) {
-                    p.setDone();
-                }
-            }).toList());
+            participant.setDone();
         }
 
-
         // Update the context in the log
-        contexts.put(participantContext.getTransactionId(), participantContext);
         logWriter.writeLog(participantContext.getTransactionId(), participantContext);
-
         TransactionResult transactionResult = new TransactionResult(success);
         return getSuccessMessage(udpMessage, transactionResult);
     }
