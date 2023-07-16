@@ -13,6 +13,7 @@ import org.wwi21seb.vs.group5.dao.BookingDAO;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.SocketException;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -136,29 +137,38 @@ public class HotelService {
                     default -> LOGGER.severe("Unknown operation received!");
                 }
 
-                if (response != null && parsedMessage.getOperation().equals(Operation.RESULT)) {
-                    LOGGER.info(String.format("Sending %s message to %s: %s", response.getOperation(), parsedMessage.getSender(), response.getData()));
-                    byte[] responseBytes = mapper.writeValueAsBytes(response);
-                    DatagramPacket responsePacket = new DatagramPacket(responseBytes, responseBytes.length, packet.getAddress(), packet.getPort());
-                    socket.send(responsePacket);
-                } else if (response != null) {
-                    ParticipantContext participantContext = contexts.get(parsedMessage.getTransactionId());
+                if (response != null) {
+                    InetAddress recipient = null;
+                    int port = -1;
+                    String recipientName = null;
 
-                    if (participantContext == null) {
-                        // This should not happen, but just in case
-                        LOGGER.log(Level.SEVERE, "No context found for transaction {0}", parsedMessage.getTransactionId());
-                        continue;
+                    if (parsedMessage.getSender().equals("CarProvider") && (parsedMessage.getOperation().equals(Operation.COMMIT) || parsedMessage.getOperation().equals(Operation.ABORT))) {
+                        ParticipantContext participantContext = contexts.get(parsedMessage.getTransactionId());
+                        if (participantContext == null) {
+                            // This should not happen, but just in case
+                            LOGGER.log(Level.SEVERE, "No context found for transaction {0}", parsedMessage.getTransactionId());
+                            continue;
+                        }
+
+                        Coordinator coordinator = participantContext.getCoordinator();
+                        recipient = coordinator.getUrl();
+                        port = coordinator.getPort();
+                        recipientName = coordinator.getName();
+                    } else {
+                        recipient = packet.getAddress();
+                        port = packet.getPort();
+                        recipientName = parsedMessage.getSender();
                     }
 
-                    Coordinator coordinator = participantContext.getCoordinator();
-
-                    LOGGER.info(String.format("Sending %s message to %s: %s", response.getOperation(), coordinator.getName(), response.getData()));
+                    LOGGER.info(String.format("Sending %s message to %s: %s", response.getOperation(), recipientName, response.getData()));
                     byte[] responseBytes = mapper.writeValueAsBytes(response);
-                    DatagramPacket responsePacket = new DatagramPacket(responseBytes, responseBytes.length, coordinator.getUrl(), coordinator.getPort());
+                    DatagramPacket responsePacket = new DatagramPacket(responseBytes, responseBytes.length, recipient, port);
                     socket.send(responsePacket);
                 } else {
                     LOGGER.info("No response to send!");
                 }
+
+                // System.exit(0);
             }
         } catch (SocketException e) {
             LOGGER.severe("Error while initializing socket!");
