@@ -15,21 +15,18 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.SocketException;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class HotelService {
 
+    private static final Logger LOGGER = LoggerFactory.setupLogger(HotelService.class.getName());
+    private static final String HOTEL_PROVIDER = "HotelProvider";
     private final DatagramSocket socket;
     private final byte[] buffer = new byte[16384];
-    private static final Logger LOGGER = LoggerFactory.setupLogger(HotelService.class.getName());
     private final ConcurrentHashMap<UUID, ParticipantContext> contexts = new ConcurrentHashMap<>();
     private final LogWriter<ParticipantContext> logWriter = new LogWriter<>();
-    private static final String HOTEL_PROVIDER = "HotelProvider";
     private final BookingDAO bookingDAO;
     private final ObjectMapper mapper;
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
@@ -38,10 +35,9 @@ public class HotelService {
         this.bookingDAO = new BookingDAO();
         this.mapper = new ObjectMapper();
 
-        LOGGER.info("Socket initialized on port 5002!");
-
         try {
             socket = new DatagramSocket(5002);
+            LOGGER.info("Socket initialized on port 5002!");
         } catch (SocketException e) {
             throw new RuntimeException(e);
         }
@@ -68,6 +64,12 @@ public class HotelService {
                         // crashed after voting yes, which is why we didn't receive the
                         // commit/abort message from the coordinator
                         response = new UDPMessage(Operation.RESULT, participantContext.getTransactionId(), participant.getName(), null);
+
+                        // Schedule a timeout task to ask the other participants for their vote
+                        // after 10 seconds, since we assume that the coordinator crashed
+                        // We don't need to ask the coordinator for the result again, since the
+                        // coordinator will send the result to us again after it has recovered
+                        askParticipantForDecision(participantContext);
                     }
                 }
                 case COMMIT -> {
@@ -130,14 +132,32 @@ public class HotelService {
                     case ABORT -> response = abort(parsedMessage);
                     case GET_BOOKINGS -> response = getBookings(parsedMessage);
                     case GET_AVAILABILITY -> response = getAvailableRooms(parsedMessage);
+                    case RESULT -> response = sendResult(parsedMessage);
                     default -> LOGGER.severe("Unknown operation received!");
                 }
 
-                if (response != null) {
-                    LOGGER.info(String.format("Sending %s message to %s: %s", response.getOperation(), response.getSender(), response.getData()));
+                if (response != null && parsedMessage.getOperation().equals(Operation.RESULT)) {
+                    LOGGER.info(String.format("Sending %s message to %s: %s", response.getOperation(), parsedMessage.getSender(), response.getData()));
                     byte[] responseBytes = mapper.writeValueAsBytes(response);
                     DatagramPacket responsePacket = new DatagramPacket(responseBytes, responseBytes.length, packet.getAddress(), packet.getPort());
                     socket.send(responsePacket);
+                } else if (response != null) {
+                    ParticipantContext participantContext = contexts.get(parsedMessage.getTransactionId());
+
+                    if (participantContext == null) {
+                        // This should not happen, but just in case
+                        LOGGER.log(Level.SEVERE, "No context found for transaction {0}", parsedMessage.getTransactionId());
+                        continue;
+                    }
+
+                    Coordinator coordinator = participantContext.getCoordinator();
+
+                    LOGGER.info(String.format("Sending %s message to %s: %s", response.getOperation(), coordinator.getName(), response.getData()));
+                    byte[] responseBytes = mapper.writeValueAsBytes(response);
+                    DatagramPacket responsePacket = new DatagramPacket(responseBytes, responseBytes.length, coordinator.getUrl(), coordinator.getPort());
+                    socket.send(responsePacket);
+                } else {
+                    LOGGER.info("No response to send!");
                 }
             }
         } catch (SocketException e) {
@@ -154,7 +174,7 @@ public class HotelService {
             LOGGER.log(Level.INFO, "Deleting transaction {0}", transactionId);
             logWriter.deleteLog(transactionId);
             contexts.remove(transactionId);
-        }, 5, TimeUnit.MINUTES);
+        }, 1, TimeUnit.MINUTES);
     }
 
     public UDPMessage prepare(UDPMessage message) {
@@ -218,10 +238,17 @@ public class HotelService {
         // Get the participant from the participantContext
         Participant participant = participantContext.getParticipants().stream().filter(p -> p.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow();
 
+        // Cancel the timeout task
+        CompletableFuture<Boolean> future = participant.getCommitFuture();
+        if (future != null) {
+            future.complete(true);
+        }
+
         if (participant.isDone()) {
             // Double check if the transaction was already committed previously
             // If so, return a TransactionResult with success = true because
             // the transaction was already committed
+            scheduleContextDeletion(participantContext.getTransactionId());
             TransactionResult transactionResult = new TransactionResult(true);
             return getSuccessMessage(message, transactionResult);
         }
@@ -277,10 +304,17 @@ public class HotelService {
         // Get the participant from the participantContext
         Participant participant = participantContext.getParticipants().stream().filter(p -> p.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow();
 
+        // Cancel the timeout task
+        CompletableFuture<Boolean> future = participant.getCommitFuture();
+        if (future != null) {
+            future.complete(true);
+        }
+
         if (participant.isDone()) {
             // Double check if the transaction was already aborted previously
             // If so, return a TransactionResult with success = true because
             // the transaction was already aborted
+            scheduleContextDeletion(participantContext.getTransactionId());
             TransactionResult transactionResult = new TransactionResult(true);
             return getSuccessMessage(udpMessage, transactionResult);
         }
@@ -301,6 +335,72 @@ public class HotelService {
         logWriter.writeLog(participantContext.getTransactionId(), participantContext);
         TransactionResult transactionResult = new TransactionResult(success);
         return getSuccessMessage(udpMessage, transactionResult);
+    }
+
+    public UDPMessage sendResult(UDPMessage message) {
+        ParticipantContext participantContext = contexts.get(message.getTransactionId());
+
+        if (participantContext == null) {
+            // If the participantContext is null, the transaction is unknown to our service
+            // This is either because we weren't available in the prepare phase or because
+            // we already deleted the context
+            return null;
+        }
+
+        // Get the transaction state from the participantContext
+        TransactionState transactionState = participantContext.getTransactionState();
+        UDPMessage udpMessage = null;
+
+        if (transactionState == TransactionState.COMMIT) {
+            LOGGER.log(Level.INFO, "Sending commit for transaction {0}", message.getTransactionId());
+            udpMessage = new UDPMessage(Operation.COMMIT, message.getTransactionId(), HOTEL_PROVIDER, null);
+        } else if (transactionState == TransactionState.ABORT) {
+            LOGGER.log(Level.INFO, "Sending abort for transaction {0}", message.getTransactionId());
+            udpMessage = new UDPMessage(Operation.ABORT, message.getTransactionId(), HOTEL_PROVIDER, null);
+        } else {
+            // We can't send a result if we don't know the transaction result
+            LOGGER.log(Level.WARNING, "Could not send result for transaction {0} because we don't know the transaction state", message.getTransactionId());
+            return null;
+        }
+
+        return udpMessage;
+    }
+
+    public void askParticipantForDecision(ParticipantContext participantContext) {
+        // Get the participant from the participantContext
+        Participant participant = participantContext.getParticipants().stream().filter(p -> p.getName().equals(HOTEL_PROVIDER)).findFirst().orElseThrow();
+
+        participant.resetCommitFuture();
+        CompletableFuture<Boolean> commitFuture = participant.getCommitFuture();
+        // After 10 seconds of no response, we assume the coordinator crashed
+        // and ask the other participants for the result of the transaction
+        commitFuture.orTimeout(10, TimeUnit.SECONDS).exceptionally(throwable -> {
+            LOGGER.log(Level.WARNING, "Coordinator crashed, asking other participants for result of transaction {0}", participantContext.getTransactionId());
+            for (Participant p : participantContext.getParticipants()) {
+                if (!p.getName().equals(HOTEL_PROVIDER)) {
+                    UDPMessage resultRequest = new UDPMessage(Operation.RESULT, participantContext.getTransactionId(), HOTEL_PROVIDER, null);
+                    DatagramPacket resultRequestPacket = new DatagramPacket(buffer, buffer.length, p.getUrl(), p.getPort());
+                    try {
+                        byte[] resultRequestBytes = mapper.writeValueAsBytes(resultRequest);
+                        resultRequestPacket.setData(resultRequestBytes);
+                        socket.send(resultRequestPacket);
+                    } catch (JsonProcessingException e) {
+                        LOGGER.log(Level.SEVERE, "Error while serializing message", e);
+                    } catch (IOException e) {
+                        LOGGER.log(Level.SEVERE, "Error while sending message", e);
+                    }
+
+                    // Trigger the askParticipantForDecision method to invoke another timeout
+                    // in case the participant also crashed
+                    askParticipantForDecision(participantContext);
+                }
+            }
+
+            return null;
+        });
+
+        // Update the context in the log
+        logWriter.writeLog(participantContext.getTransactionId(), participantContext);
     }
 
     public UDPMessage getBookings(UDPMessage parsedMessage) {
