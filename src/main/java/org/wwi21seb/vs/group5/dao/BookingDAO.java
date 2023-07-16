@@ -80,11 +80,12 @@ public class BookingDAO {
             stmt.executeUpdate();
 
             stmt.close();
-            return bookingId;
         } catch (SQLException e) {
             LOGGER.severe("SQL Exception: " + e.getMessage());
             return null;
         }
+
+        return bookingId;
     }
 
     public boolean confirmBooking(UUID bookingId) {
